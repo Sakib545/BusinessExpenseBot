@@ -35,3 +35,17 @@ def parse_expense(text: str, categories: tuple[str, ...]) -> ParsedExpense | Non
         return None
 
     return ParsedExpense(amount=amount, category=category)
+
+
+def parse_amount_only(text: str) -> float | None:
+    normalized = normalize(text)
+    match = re.fullmatch(
+        r"৳?\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)", normalized
+    )
+    if not match:
+        return None
+    try:
+        amount = float(match.group(1).replace(",", ""))
+    except ValueError:
+        return None
+    return amount if amount > 0 else None

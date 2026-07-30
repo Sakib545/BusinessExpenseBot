@@ -20,7 +20,7 @@ from telegram.ext import (
 )
 
 from config import settings
-from expense_parser import parse_expense
+from expense_parser import parse_amount_only, parse_expense
 from sheets import GoogleSheetStore
 
 
@@ -85,6 +85,37 @@ async def save_expense(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     text = update.effective_message.text or ""
     parsed = parse_expense(text, settings.categories)
     if not parsed:
+        amount = parse_amount_only(text)
+        if amount is not None:
+            context.user_data["pending_amount"] = amount
+            category_buttons = []
+            for index in range(0, len(settings.categories), 2):
+                row = [
+                    InlineKeyboardButton(
+                        settings.categories[index],
+                        callback_data=f"category_pick:{index}",
+                    )
+                ]
+                if index + 1 < len(settings.categories):
+                    row.append(
+                        InlineKeyboardButton(
+                            settings.categories[index + 1],
+                            callback_data=f"category_pick:{index + 1}",
+                        )
+                    )
+                category_buttons.append(row)
+            category_buttons.append(
+                [
+                    InlineKeyboardButton(
+                        "❌ Cancel", callback_data="category_cancel"
+                    )
+                ]
+            )
+            await update.effective_message.reply_text(
+                f"💰 পরিমাণ: {amount_text(amount)}\n\nএটা কিসের টাকা?",
+                reply_markup=InlineKeyboardMarkup(category_buttons),
+            )
+            return
         await update.effective_message.reply_text(
             "❌ বুঝতে পারিনি। উদাহরণ: 10000 তেলের টাকা\n"
             "সঠিক ক্যাটাগরির নাম ব্যবহার করুন।"
@@ -107,6 +138,54 @@ async def save_expense(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         f"📅 তারিখ: {date_text}\n"
         f"📂 ক্যাটাগরি: {parsed.category}\n"
         f"💰 পরিমাণ: ৳{parsed.amount:,.2f}".replace(".00", "")
+    )
+
+
+async def category_callback(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    query = update.callback_query
+    if not query:
+        return
+    await query.answer()
+    if not is_authorized(update):
+        await query.edit_message_text("⛔ এই কাজের অনুমতি আপনার নেই।")
+        return
+
+    data = query.data or ""
+    if data == "category_cancel":
+        context.user_data.pop("pending_amount", None)
+        await query.edit_message_text("❌ খরচ Save বাতিল করা হয়েছে।")
+        return
+
+    amount = context.user_data.get("pending_amount")
+    if amount is None:
+        await query.edit_message_text(
+            "⚠️ এই request-এর সময় শেষ হয়েছে। Amount আবার পাঠান।"
+        )
+        return
+    try:
+        category_index = int(data.split(":", 1)[1])
+        category = settings.categories[category_index]
+    except (ValueError, IndexError):
+        await query.edit_message_text("⚠️ Category নির্বাচন সঠিক নয়।")
+        return
+
+    try:
+        date_text = await asyncio.to_thread(store.add_expense, category, amount)
+    except Exception:
+        logger.exception("Could not save categorized expense")
+        await query.edit_message_text(
+            "⚠️ Google Sheet-এ Save করা যায়নি। আবার চেষ্টা করুন।"
+        )
+        return
+
+    context.user_data.pop("pending_amount", None)
+    await query.edit_message_text(
+        "✅ খরচ Save হয়েছে\n"
+        f"📅 তারিখ: {date_text}\n"
+        f"📂 ক্যাটাগরি: {category}\n"
+        f"💰 পরিমাণ: {amount_text(amount)}"
     )
 
 
@@ -506,6 +585,11 @@ def main() -> None:
     )
     app.add_handler(
         CallbackQueryHandler(export_callback, pattern=r"^export_(list:|format:|run:|home|cancel)")
+    )
+    app.add_handler(
+        CallbackQueryHandler(
+            category_callback, pattern=r"^category_(pick:|cancel)"
+        )
     )
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, save_expense))
     app.add_error_handler(error_handler)
