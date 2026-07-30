@@ -25,12 +25,15 @@ SCOPES = (
     "https://www.googleapis.com/auth/drive",
 )
 HEADERS = ["Date", "Category", "Amount"]
+MASTER_SHEET_NAME = "All Expenses"
+SUMMARY_SHEET_NAME = "Summary"
 
 
 class GoogleSheetStore:
     def __init__(self, settings: Settings):
         self.settings = settings
         self._worksheet = None
+        self._spreadsheet = None
         self._lock = Lock()
 
     def _credentials(self):
@@ -41,12 +44,19 @@ class GoogleSheetStore:
     def _connect(self):
         client = gspread.authorize(self._credentials())
         spreadsheet = client.open_by_key(self.settings.spreadsheet_id)
+        self._spreadsheet = spreadsheet
         try:
-            return spreadsheet.worksheet(self.settings.worksheet_name)
+            return spreadsheet.worksheet(MASTER_SHEET_NAME)
         except gspread.WorksheetNotFound:
-            return spreadsheet.add_worksheet(
-                title=self.settings.worksheet_name, rows=1000, cols=3
-            )
+            try:
+                old_sheet = spreadsheet.worksheet(self.settings.worksheet_name)
+                if old_sheet.title != MASTER_SHEET_NAME:
+                    old_sheet.update_title(MASTER_SHEET_NAME)
+                return old_sheet
+            except gspread.WorksheetNotFound:
+                return spreadsheet.add_worksheet(
+                    title=MASTER_SHEET_NAME, rows=1000, cols=3
+                )
 
     @property
     def worksheet(self):
@@ -64,6 +74,56 @@ class GoogleSheetStore:
                     "Worksheet-এর প্রথম row অবশ্যই Date, Category, Amount হতে হবে"
                 )
             self.worksheet.freeze(rows=1)
+            self._ensure_derived_sheets()
+
+    def _get_or_create_sheet(
+        self, title: str, rows: int = 1000, cols: int = 3
+    ):
+        try:
+            return self._spreadsheet.worksheet(title)
+        except gspread.WorksheetNotFound:
+            return self._spreadsheet.add_worksheet(
+                title=title, rows=rows, cols=cols
+            )
+
+    def _ensure_derived_sheets(self) -> None:
+        master_ref = f"'{MASTER_SHEET_NAME}'"
+        for category in self.settings.categories:
+            category_sheet = self._get_or_create_sheet(
+                category, rows=1000, cols=2
+            )
+            category_formula = (
+                f'=IFERROR(FILTER({{{master_ref}!A2:A,{master_ref}!C2:C}},'
+                f'{master_ref}!B2:B="{category}"),"")'
+            )
+            category_sheet.update(
+                values=[["Date", "Amount"], [category_formula]],
+                range_name="A1:B2",
+                value_input_option="USER_ENTERED",
+            )
+            category_sheet.freeze(rows=1)
+
+        summary_sheet = self._get_or_create_sheet(
+            SUMMARY_SHEET_NAME, rows=20, cols=2
+        )
+        summary_values = [["Category", "Total Amount"]]
+        for row_number, category in enumerate(
+            self.settings.categories, start=2
+        ):
+            formula = (
+                f'=SUMIF({master_ref}!B:B,A{row_number},{master_ref}!C:C)'
+            )
+            summary_values.append([category, formula])
+        total_row = len(self.settings.categories) + 2
+        summary_values.append(
+            ["সর্বমোট", f"=SUM(B2:B{total_row - 1})"]
+        )
+        summary_sheet.update(
+            values=summary_values,
+            range_name=f"A1:B{total_row}",
+            value_input_option="USER_ENTERED",
+        )
+        summary_sheet.freeze(rows=1)
 
     def now(self) -> datetime:
         return datetime.now(self.settings.timezone)
