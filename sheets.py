@@ -66,7 +66,7 @@ class GoogleSheetStore:
             values = self.worksheet.get_all_values()
 
         rows = []
-        for row in values[1:]:
+        for row_number, row in enumerate(values[1:], start=2):
             if len(row) < 3:
                 continue
             try:
@@ -77,7 +77,12 @@ class GoogleSheetStore:
             except (ValueError, TypeError):
                 continue
             rows.append(
-                {"date": date_value, "category": row[1].strip(), "amount": amount}
+                {
+                    "row_number": row_number,
+                    "date": date_value,
+                    "category": row[1].strip(),
+                    "amount": amount,
+                }
             )
         return rows
 
@@ -95,3 +100,44 @@ class GoogleSheetStore:
 
     def get_all(self) -> list[dict]:
         return self._read_rows()
+
+    def get_recent(self, limit: int = 10) -> list[dict]:
+        rows = self._read_rows()
+        return list(reversed(rows[-limit:]))
+
+    def get_expense(self, row_number: int) -> dict | None:
+        if row_number < 2:
+            return None
+        return next(
+            (
+                row
+                for row in self._read_rows()
+                if row["row_number"] == row_number
+            ),
+            None,
+        )
+
+    def delete_expense(self, row_number: int) -> dict | None:
+        if row_number < 2:
+            return None
+        with self._lock:
+            values = self.worksheet.row_values(row_number)
+            if len(values) < 3:
+                return None
+            try:
+                date_value = datetime.strptime(
+                    values[0].strip(), "%Y-%m-%d"
+                ).date()
+                amount = float(
+                    values[2].replace(",", "").replace("৳", "").strip()
+                )
+            except (ValueError, TypeError):
+                return None
+            deleted = {
+                "row_number": row_number,
+                "date": date_value,
+                "category": values[1].strip(),
+                "amount": amount,
+            }
+            self.worksheet.delete_rows(row_number)
+            return deleted

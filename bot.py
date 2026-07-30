@@ -1,9 +1,16 @@
 import asyncio
 import logging
 
-from telegram import Update
+from telegram import (
+    BotCommand,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    ReplyKeyboardMarkup,
+    Update,
+)
 from telegram.ext import (
     Application,
+    CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
     MessageHandler,
@@ -22,6 +29,16 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 store = GoogleSheetStore(settings)
+
+MENU = ReplyKeyboardMarkup(
+    [
+        ["📅 আজকের হিসাব", "🗓️ এই মাস"],
+        ["📊 সারাংশ", "🗑️ Delete"],
+        ["ℹ️ Help"],
+    ],
+    resize_keyboard=True,
+    is_persistent=True,
+)
 
 
 def is_authorized(update: Update) -> bool:
@@ -51,7 +68,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "কমান্ড:\n"
         "/today — আজকের হিসাব\n"
         "/month — এই মাসের হিসাব\n"
-        "/summary — সব ক্যাটাগরির মোট"
+        "/summary — সব ক্যাটাগরির মোট\n"
+        "/delete — সাম্প্রতিক খরচ Delete"
+        ,
+        reply_markup=MENU,
     )
 
 
@@ -134,20 +154,167 @@ async def summary(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await report(update, "📊 সব ক্যাটাগরির মোট হিসাব", "get_all")
 
 
+def amount_text(amount: float) -> str:
+    return f"৳{amount:,.2f}".replace(".00", "")
+
+
+async def delete_menu(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    if await reject_if_unauthorized(update):
+        return
+    try:
+        rows = await asyncio.to_thread(store.get_recent, 10)
+    except Exception:
+        logger.exception("Could not load recent expenses")
+        await update.effective_message.reply_text(
+            "⚠️ সাম্প্রতিক খরচ আনা যায়নি।", reply_markup=MENU
+        )
+        return
+
+    if not rows:
+        await update.effective_message.reply_text(
+            "Delete করার মতো কোনো খরচ নেই।", reply_markup=MENU
+        )
+        return
+
+    buttons = []
+    for row in rows:
+        label = (
+            f"#{row['row_number']} • {row['date'].strftime('%d-%m')} • "
+            f"{row['category']} • {amount_text(row['amount'])}"
+        )
+        buttons.append(
+            [
+                InlineKeyboardButton(
+                    label, callback_data=f"delete_pick:{row['row_number']}"
+                )
+            ]
+        )
+    buttons.append([InlineKeyboardButton("❌ বাতিল", callback_data="delete_cancel")])
+    await update.effective_message.reply_text(
+        "🗑️ যে খরচটি Delete করতে চান সেটি নির্বাচন করুন:",
+        reply_markup=InlineKeyboardMarkup(buttons),
+    )
+
+
+async def delete_callback(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    query = update.callback_query
+    if not query:
+        return
+    await query.answer()
+    if not is_authorized(update):
+        await query.edit_message_text("⛔ এই কাজের অনুমতি আপনার নেই।")
+        return
+
+    data = query.data or ""
+    if data == "delete_cancel":
+        await query.edit_message_text("❌ Delete বাতিল করা হয়েছে।")
+        return
+
+    if data.startswith("delete_pick:"):
+        try:
+            row_number = int(data.split(":", 1)[1])
+            row = await asyncio.to_thread(store.get_expense, row_number)
+        except (ValueError, TypeError):
+            row = None
+        except Exception:
+            logger.exception("Could not load selected expense")
+            row = None
+
+        if not row:
+            await query.edit_message_text(
+                "⚠️ খরচটি পাওয়া যায়নি বা আগেই Delete হয়েছে।"
+            )
+            return
+
+        text = (
+            "⚠️ এই খরচটি Delete করবেন?\n\n"
+            f"📅 {row['date'].strftime('%Y-%m-%d')}\n"
+            f"📂 {row['category']}\n"
+            f"💰 {amount_text(row['amount'])}"
+        )
+        keyboard = InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton(
+                        "✅ Confirm", callback_data=f"delete_ok:{row_number}"
+                    ),
+                    InlineKeyboardButton("❌ Cancel", callback_data="delete_cancel"),
+                ]
+            ]
+        )
+        await query.edit_message_text(text, reply_markup=keyboard)
+        return
+
+    if data.startswith("delete_ok:"):
+        try:
+            row_number = int(data.split(":", 1)[1])
+            deleted = await asyncio.to_thread(store.delete_expense, row_number)
+        except (ValueError, TypeError):
+            deleted = None
+        except Exception:
+            logger.exception("Could not delete expense")
+            deleted = None
+
+        if not deleted:
+            await query.edit_message_text(
+                "⚠️ খরচটি পাওয়া যায়নি বা আগেই Delete হয়েছে।"
+            )
+            return
+        await query.edit_message_text(
+            "✅ খরচ Delete হয়েছে\n\n"
+            f"📅 {deleted['date'].strftime('%Y-%m-%d')}\n"
+            f"📂 {deleted['category']}\n"
+            f"💰 {amount_text(deleted['amount'])}"
+        )
+
+
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     logger.exception("Unhandled Telegram update error", exc_info=context.error)
+
+
+async def post_init(application: Application) -> None:
+    await application.bot.set_my_commands(
+        [
+            BotCommand("start", "Bot চালু ও Menu দেখুন"),
+            BotCommand("today", "আজকের হিসাব"),
+            BotCommand("month", "এই মাসের হিসাব"),
+            BotCommand("summary", "সব ক্যাটাগরির মোট"),
+            BotCommand("delete", "সাম্প্রতিক খরচ Delete"),
+            BotCommand("help", "সাহায্য ও Menu"),
+        ]
+    )
 
 
 def main() -> None:
     settings.validate()
     store.ensure_sheet()
 
-    app = Application.builder().token(settings.bot_token).build()
+    app = (
+        Application.builder()
+        .token(settings.bot_token)
+        .post_init(post_init)
+        .build()
+    )
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", start))
     app.add_handler(CommandHandler("today", today))
     app.add_handler(CommandHandler("month", month))
     app.add_handler(CommandHandler("summary", summary))
+    app.add_handler(CommandHandler("delete", delete_menu))
+    app.add_handler(
+        MessageHandler(filters.Regex(r"^📅 আজকের হিসাব$"), today)
+    )
+    app.add_handler(MessageHandler(filters.Regex(r"^🗓️ এই মাস$"), month))
+    app.add_handler(MessageHandler(filters.Regex(r"^📊 সারাংশ$"), summary))
+    app.add_handler(MessageHandler(filters.Regex(r"^🗑️ Delete$"), delete_menu))
+    app.add_handler(MessageHandler(filters.Regex(r"^ℹ️ Help$"), start))
+    app.add_handler(
+        CallbackQueryHandler(delete_callback, pattern=r"^delete_(pick:|ok:|cancel)")
+    )
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, save_expense))
     app.add_error_handler(error_handler)
 
