@@ -75,6 +75,7 @@ class GoogleSheetStore:
                 )
             self.worksheet.freeze(rows=1)
             self._ensure_derived_sheets()
+            self._apply_sheet_styling()
 
     def _get_or_create_sheet(
         self, title: str, rows: int = 1000, cols: int = 3
@@ -124,6 +125,383 @@ class GoogleSheetStore:
             value_input_option="USER_ENTERED",
         )
         summary_sheet.freeze(rows=1)
+
+    @staticmethod
+    def _color(hex_color: str) -> dict:
+        value = hex_color.lstrip("#")
+        return {
+            "red": int(value[0:2], 16) / 255,
+            "green": int(value[2:4], 16) / 255,
+            "blue": int(value[4:6], 16) / 255,
+        }
+
+    def _apply_sheet_styling(self) -> None:
+        navy = self._color("#17324D")
+        teal = self._color("#0F8B8D")
+        gold = self._color("#E6B447")
+        white = self._color("#FFFFFF")
+        light_blue = self._color("#F1F7FA")
+        light_teal = self._color("#EAF7F5")
+        light_gold = self._color("#FFF8E7")
+        total_green = self._color("#DDF3E4")
+
+        controlled_titles = {
+            MASTER_SHEET_NAME,
+            SUMMARY_SHEET_NAME,
+            *self.settings.categories,
+        }
+        worksheets = {
+            sheet.title: sheet
+            for sheet in self._spreadsheet.worksheets()
+            if sheet.title in controlled_titles
+        }
+        metadata = self._spreadsheet.fetch_sheet_metadata()
+        requests = []
+        master_values = self.worksheet.get_all_values()
+        category_counts = {category: 0 for category in self.settings.categories}
+        for row in master_values[1:]:
+            if len(row) >= 2 and row[1] in category_counts:
+                category_counts[row[1]] += 1
+
+        # Remove and rebuild only this Bot's alternating-row bands so repeated
+        # Railway restarts never stack duplicate formatting rules.
+        controlled_ids = {sheet.id for sheet in worksheets.values()}
+        for sheet_metadata in metadata.get("sheets", []):
+            sheet_id = sheet_metadata["properties"]["sheetId"]
+            if sheet_id not in controlled_ids:
+                continue
+            for banding in sheet_metadata.get("bandedRanges", []):
+                requests.append(
+                    {"deleteBanding": {"bandedRangeId": banding["bandedRangeId"]}}
+                )
+
+        category_palette = (
+            "#0F8B8D",
+            "#2878B5",
+            "#6C63B5",
+            "#D98C3F",
+            "#3A9D5D",
+            "#C45A84",
+            "#6B7C93",
+        )
+
+        for title, sheet in worksheets.items():
+            is_master = title == MASTER_SHEET_NAME
+            is_summary = title == SUMMARY_SHEET_NAME
+            column_count = 3 if is_master else 2
+            tab_hex = (
+                "#17324D"
+                if is_master
+                else "#E6B447"
+                if is_summary
+                else category_palette[self.settings.categories.index(title)]
+            )
+            header_color = gold if is_summary else navy if is_master else teal
+            header_text = navy if is_summary else white
+            used_rows = (
+                max(len(master_values), 1)
+                if is_master
+                else len(self.settings.categories) + 2
+                if is_summary
+                else category_counts[title] + 1
+            )
+            formatted_end_row = min(
+                sheet.row_count, max(used_rows + 20, 20)
+            )
+
+            requests.extend(
+                [
+                    {
+                        "updateSheetProperties": {
+                            "properties": {
+                                "sheetId": sheet.id,
+                                "tabColorStyle": {
+                                    "rgbColor": self._color(tab_hex)
+                                },
+                                "gridProperties": {"hideGridlines": True},
+                            },
+                            "fields": (
+                                "tabColorStyle,gridProperties.hideGridlines"
+                            ),
+                        }
+                    },
+                    {
+                        "repeatCell": {
+                            "range": {
+                                "sheetId": sheet.id,
+                                "startRowIndex": 0,
+                                "endRowIndex": 1,
+                                "startColumnIndex": 0,
+                                "endColumnIndex": column_count,
+                            },
+                            "cell": {
+                                "userEnteredFormat": {
+                                    "backgroundColorStyle": {
+                                        "rgbColor": header_color
+                                    },
+                                    "textFormat": {
+                                        "bold": True,
+                                        "fontSize": 11,
+                                        "foregroundColorStyle": {
+                                            "rgbColor": header_text
+                                        },
+                                    },
+                                    "horizontalAlignment": "CENTER",
+                                    "verticalAlignment": "MIDDLE",
+                                }
+                            },
+                            "fields": "userEnteredFormat",
+                        }
+                    },
+                    {
+                        "updateDimensionProperties": {
+                            "range": {
+                                "sheetId": sheet.id,
+                                "dimension": "ROWS",
+                                "startIndex": 0,
+                                "endIndex": 1,
+                            },
+                            "properties": {"pixelSize": 38},
+                            "fields": "pixelSize",
+                        }
+                    },
+                    {
+                        "updateDimensionProperties": {
+                            "range": {
+                                "sheetId": sheet.id,
+                                "dimension": "COLUMNS",
+                                "startIndex": 0,
+                                "endIndex": 1,
+                            },
+                            "properties": {"pixelSize": 130},
+                            "fields": "pixelSize",
+                        }
+                    },
+                    {
+                        "updateDimensionProperties": {
+                            "range": {
+                                "sheetId": sheet.id,
+                                "dimension": "COLUMNS",
+                                "startIndex": 1,
+                                "endIndex": 2,
+                            },
+                            "properties": {
+                                "pixelSize": 250 if is_master else 190
+                            },
+                            "fields": "pixelSize",
+                        }
+                    },
+                ]
+            )
+            if formatted_end_row < sheet.row_count:
+                requests.append(
+                    {
+                        "repeatCell": {
+                            "range": {
+                                "sheetId": sheet.id,
+                                "startRowIndex": formatted_end_row,
+                                "endRowIndex": sheet.row_count,
+                                "startColumnIndex": 0,
+                                "endColumnIndex": column_count,
+                            },
+                            "cell": {"userEnteredFormat": {}},
+                            "fields": "userEnteredFormat",
+                        }
+                    }
+                )
+
+            if is_master:
+                requests.extend(
+                    [
+                        {
+                            "updateDimensionProperties": {
+                                "range": {
+                                    "sheetId": sheet.id,
+                                    "dimension": "COLUMNS",
+                                    "startIndex": 2,
+                                    "endIndex": 3,
+                                },
+                                "properties": {"pixelSize": 150},
+                                "fields": "pixelSize",
+                            }
+                        },
+                        {
+                            "repeatCell": {
+                                "range": {
+                                    "sheetId": sheet.id,
+                                    "startRowIndex": 1,
+                                    "endRowIndex": formatted_end_row,
+                                    "startColumnIndex": 2,
+                                    "endColumnIndex": 3,
+                                },
+                                "cell": {
+                                    "userEnteredFormat": {
+                                        "numberFormat": {
+                                            "type": "NUMBER",
+                                            "pattern": '"৳"#,##0.00',
+                                        },
+                                        "horizontalAlignment": "RIGHT",
+                                    }
+                                },
+                                "fields": (
+                                    "userEnteredFormat.numberFormat,"
+                                    "userEnteredFormat.horizontalAlignment"
+                                ),
+                            }
+                        },
+                        {
+                            "addBanding": {
+                                "bandedRange": {
+                                    "range": {
+                                        "sheetId": sheet.id,
+                                        "startRowIndex": 0,
+                                        "endRowIndex": formatted_end_row,
+                                        "startColumnIndex": 0,
+                                        "endColumnIndex": 3,
+                                    },
+                                    "rowProperties": {
+                                        "headerColorStyle": {"rgbColor": navy},
+                                        "firstBandColorStyle": {
+                                            "rgbColor": white
+                                        },
+                                        "secondBandColorStyle": {
+                                            "rgbColor": light_blue
+                                        },
+                                    },
+                                }
+                            }
+                        },
+                    ]
+                )
+            elif is_summary:
+                total_row_index = len(self.settings.categories) + 1
+                requests.extend(
+                    [
+                        {
+                            "repeatCell": {
+                                "range": {
+                                    "sheetId": sheet.id,
+                                    "startRowIndex": 1,
+                                    "endRowIndex": formatted_end_row,
+                                    "startColumnIndex": 1,
+                                    "endColumnIndex": 2,
+                                },
+                                "cell": {
+                                    "userEnteredFormat": {
+                                        "numberFormat": {
+                                            "type": "NUMBER",
+                                            "pattern": '"৳"#,##0.00',
+                                        },
+                                        "horizontalAlignment": "RIGHT",
+                                    }
+                                },
+                                "fields": (
+                                    "userEnteredFormat.numberFormat,"
+                                    "userEnteredFormat.horizontalAlignment"
+                                ),
+                            }
+                        },
+                        {
+                            "repeatCell": {
+                                "range": {
+                                    "sheetId": sheet.id,
+                                    "startRowIndex": 1,
+                                    "endRowIndex": total_row_index,
+                                    "startColumnIndex": 0,
+                                    "endColumnIndex": 2,
+                                },
+                                "cell": {
+                                    "userEnteredFormat": {
+                                        "backgroundColorStyle": {
+                                            "rgbColor": light_gold
+                                        }
+                                    }
+                                },
+                                "fields": "userEnteredFormat.backgroundColorStyle",
+                            }
+                        },
+                        {
+                            "repeatCell": {
+                                "range": {
+                                    "sheetId": sheet.id,
+                                    "startRowIndex": total_row_index,
+                                    "endRowIndex": total_row_index + 1,
+                                    "startColumnIndex": 0,
+                                    "endColumnIndex": 2,
+                                },
+                                "cell": {
+                                    "userEnteredFormat": {
+                                        "backgroundColorStyle": {
+                                            "rgbColor": total_green
+                                        },
+                                        "textFormat": {
+                                            "bold": True,
+                                            "fontSize": 11,
+                                        },
+                                    }
+                                },
+                                "fields": (
+                                    "userEnteredFormat.backgroundColorStyle,"
+                                    "userEnteredFormat.textFormat"
+                                ),
+                            }
+                        },
+                    ]
+                )
+            else:
+                requests.extend(
+                    [
+                        {
+                            "repeatCell": {
+                                "range": {
+                                    "sheetId": sheet.id,
+                                    "startRowIndex": 1,
+                                    "endRowIndex": formatted_end_row,
+                                    "startColumnIndex": 1,
+                                    "endColumnIndex": 2,
+                                },
+                                "cell": {
+                                    "userEnteredFormat": {
+                                        "numberFormat": {
+                                            "type": "NUMBER",
+                                            "pattern": '"৳"#,##0.00',
+                                        },
+                                        "horizontalAlignment": "RIGHT",
+                                    }
+                                },
+                                "fields": (
+                                    "userEnteredFormat.numberFormat,"
+                                    "userEnteredFormat.horizontalAlignment"
+                                ),
+                            }
+                        },
+                        {
+                            "addBanding": {
+                                "bandedRange": {
+                                    "range": {
+                                        "sheetId": sheet.id,
+                                        "startRowIndex": 0,
+                                        "endRowIndex": formatted_end_row,
+                                        "startColumnIndex": 0,
+                                        "endColumnIndex": 2,
+                                    },
+                                    "rowProperties": {
+                                        "headerColorStyle": {"rgbColor": teal},
+                                        "firstBandColorStyle": {
+                                            "rgbColor": white
+                                        },
+                                        "secondBandColorStyle": {
+                                            "rgbColor": light_teal
+                                        },
+                                    },
+                                }
+                            }
+                        },
+                    ]
+                )
+
+        if requests:
+            self._spreadsheet.batch_update({"requests": requests})
 
     def now(self) -> datetime:
         return datetime.now(self.settings.timezone)
