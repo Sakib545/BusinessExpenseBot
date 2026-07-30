@@ -73,6 +73,7 @@ class GoogleSheetStore:
                 raise ValueError(
                     "Worksheet-এর প্রথম row অবশ্যই Date, Category, Amount হতে হবে"
                 )
+            self._normalize_existing_dates()
             self.worksheet.freeze(rows=1)
             self._ensure_derived_sheets()
             self._apply_sheet_styling()
@@ -309,6 +310,33 @@ class GoogleSheetStore:
                         }
                     }
                 )
+            if not is_summary:
+                requests.append(
+                    {
+                        "repeatCell": {
+                            "range": {
+                                "sheetId": sheet.id,
+                                "startRowIndex": 1,
+                                "endRowIndex": formatted_end_row,
+                                "startColumnIndex": 0,
+                                "endColumnIndex": 1,
+                            },
+                            "cell": {
+                                "userEnteredFormat": {
+                                    "numberFormat": {
+                                        "type": "DATE",
+                                        "pattern": "dd-mm-yyyy",
+                                    },
+                                    "horizontalAlignment": "CENTER",
+                                }
+                            },
+                            "fields": (
+                                "userEnteredFormat.numberFormat,"
+                                "userEnteredFormat.horizontalAlignment"
+                            ),
+                        }
+                    }
+                )
 
             if is_master:
                 requests.extend(
@@ -503,16 +531,62 @@ class GoogleSheetStore:
         if requests:
             self._spreadsheet.batch_update({"requests": requests})
 
+    @staticmethod
+    def _parse_sheet_date(value) -> date:
+        if isinstance(value, (int, float)):
+            return date(1899, 12, 30) + timedelta(days=int(value))
+        text = str(value).strip()
+        for date_format in (
+            "%Y-%m-%d",
+            "%d-%m-%Y",
+            "%d/%m/%Y",
+            "%Y/%m/%d",
+        ):
+            try:
+                return datetime.strptime(text, date_format).date()
+            except ValueError:
+                continue
+        raise ValueError(f"Unsupported date value: {text}")
+
+    def _normalize_existing_dates(self) -> None:
+        raw_dates = self.worksheet.get(
+            f"A2:A{self.worksheet.row_count}",
+            value_render_option="UNFORMATTED_VALUE",
+        )
+        updates = []
+        for row_number, row in enumerate(raw_dates, start=2):
+            if not row or row[0] in ("", None):
+                continue
+            if isinstance(row[0], (int, float)):
+                continue
+            try:
+                parsed_date = self._parse_sheet_date(row[0])
+            except ValueError:
+                continue
+            updates.append(
+                {
+                    "range": f"A{row_number}",
+                    "values": [[parsed_date.strftime("%d/%m/%Y")]],
+                }
+            )
+        if updates:
+            self.worksheet.batch_update(
+                updates, value_input_option="USER_ENTERED"
+            )
+
     def now(self) -> datetime:
         return datetime.now(self.settings.timezone)
 
     def add_expense(self, category: str, amount: float) -> str:
-        date_text = self.now().strftime("%Y-%m-%d")
+        current_date = self.now().date()
+        sheet_date = current_date.strftime("%d/%m/%Y")
+        display_date = current_date.strftime("%d-%m-%Y")
         with self._lock:
             self.worksheet.append_row(
-                [date_text, category, amount], value_input_option="USER_ENTERED"
+                [sheet_date, category, amount],
+                value_input_option="USER_ENTERED",
             )
-        return date_text
+        return display_date
 
     def _read_rows(self) -> list[dict]:
         with self._lock:
@@ -523,7 +597,7 @@ class GoogleSheetStore:
             if len(row) < 3:
                 continue
             try:
-                date_value = datetime.strptime(row[0].strip(), "%Y-%m-%d").date()
+                date_value = self._parse_sheet_date(row[0])
                 amount = float(
                     row[2].replace(",", "").replace("৳", "").strip()
                 )
@@ -578,9 +652,7 @@ class GoogleSheetStore:
             if len(values) < 3:
                 return None
             try:
-                date_value = datetime.strptime(
-                    values[0].strip(), "%Y-%m-%d"
-                ).date()
+                date_value = self._parse_sheet_date(values[0])
                 amount = float(
                     values[2].replace(",", "").replace("৳", "").strip()
                 )
