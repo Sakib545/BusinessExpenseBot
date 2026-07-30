@@ -2,3 +2,5 @@ python-telegram-bot==22.8
 gspread==6.2.1
 google-auth>=2.40,<3
 python-dotenv==1.2.2
+openpyxl==3.1.5
+reportlab[shaping]==5.0.0

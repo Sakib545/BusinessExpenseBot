@@ -1,8 +1,21 @@
-from datetime import datetime
+from datetime import date, datetime, timedelta
+from io import BytesIO
+from pathlib import Path
 from threading import Lock
+from xml.sax.saxutils import escape
 
 import gspread
+from google.auth.transport.requests import AuthorizedSession
 from google.oauth2.service_account import Credentials
+from openpyxl import Workbook
+from openpyxl.styles import Alignment, Font, PatternFill
+from reportlab.lib import colors
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.styles import ParagraphStyle
+from reportlab.lib.units import mm
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
+from reportlab.platypus import LongTable, Paragraph, SimpleDocTemplate, Spacer, TableStyle
 
 from config import Settings
 
@@ -20,11 +33,13 @@ class GoogleSheetStore:
         self._worksheet = None
         self._lock = Lock()
 
-    def _connect(self):
-        credentials = Credentials.from_service_account_info(
+    def _credentials(self):
+        return Credentials.from_service_account_info(
             self.settings.credentials, scopes=SCOPES
         )
-        client = gspread.authorize(credentials)
+
+    def _connect(self):
+        client = gspread.authorize(self._credentials())
         spreadsheet = client.open_by_key(self.settings.spreadsheet_id)
         try:
             return spreadsheet.worksheet(self.settings.worksheet_name)
@@ -141,3 +156,196 @@ class GoogleSheetStore:
             }
             self.worksheet.delete_rows(row_number)
             return deleted
+
+    def export_spreadsheet(self, mime_type: str) -> bytes:
+        allowed_types = {
+            "application/pdf",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        }
+        if mime_type not in allowed_types:
+            raise ValueError("Unsupported export format")
+
+        session = AuthorizedSession(self._credentials())
+        response = session.get(
+            "https://www.googleapis.com/drive/v3/files/"
+            f"{self.settings.spreadsheet_id}/export",
+            params={"mimeType": mime_type},
+            timeout=60,
+        )
+        response.raise_for_status()
+        return response.content
+
+    def get_period_rows(self, period: str, offset: int) -> list[dict]:
+        if offset < 0:
+            raise ValueError("Offset cannot be negative")
+        today = self.now().date()
+
+        if period == "week":
+            current_monday = today - timedelta(days=today.weekday())
+            start = current_monday - timedelta(weeks=offset)
+            end = start + timedelta(days=6)
+        elif period == "month":
+            month_index = today.year * 12 + today.month - 1 - offset
+            year, zero_based_month = divmod(month_index, 12)
+            month = zero_based_month + 1
+            start = date(year, month, 1)
+            if month == 12:
+                end = date(year + 1, 1, 1) - timedelta(days=1)
+            else:
+                end = date(year, month + 1, 1) - timedelta(days=1)
+        elif period == "all":
+            return self._read_rows()
+        else:
+            raise ValueError("Unsupported period")
+
+        return [
+            row for row in self._read_rows() if start <= row["date"] <= end
+        ]
+
+    @staticmethod
+    def _build_xlsx(rows: list[dict], title: str) -> bytes:
+        workbook = Workbook()
+        worksheet = workbook.active
+        worksheet.title = "Expenses"
+        worksheet.append(["Date", "Category", "Amount"])
+
+        for row in rows:
+            worksheet.append(
+                [
+                    row["date"].strftime("%Y-%m-%d"),
+                    row["category"],
+                    row["amount"],
+                ]
+            )
+
+        total_row = len(rows) + 2
+        worksheet.cell(total_row, 2, "Total")
+        worksheet.cell(total_row, 3, f"=SUM(C2:C{total_row - 1})")
+        worksheet.freeze_panes = "A2"
+        worksheet.column_dimensions["A"].width = 16
+        worksheet.column_dimensions["B"].width = 32
+        worksheet.column_dimensions["C"].width = 18
+
+        header_fill = PatternFill("solid", fgColor="1F4E78")
+        for cell in worksheet[1]:
+            cell.font = Font(bold=True, color="FFFFFF")
+            cell.fill = header_fill
+            cell.alignment = Alignment(horizontal="center")
+        worksheet.cell(total_row, 2).font = Font(bold=True)
+        worksheet.cell(total_row, 3).font = Font(bold=True)
+        worksheet.sheet_properties.pageSetUpPr.fitToPage = True
+        worksheet.oddHeader.center.text = title
+
+        output = BytesIO()
+        workbook.save(output)
+        return output.getvalue()
+
+    def _build_pdf(self, rows: list[dict], title: str) -> bytes:
+        font_path = (
+            Path(__file__).resolve().parent
+            / "assets"
+            / "NotoSansBengali.ttf"
+        )
+        if not font_path.exists():
+            raise FileNotFoundError("Bengali PDF font is missing")
+        font_name = "NotoSansBengali"
+        if font_name not in pdfmetrics.getRegisteredFontNames():
+            pdfmetrics.registerFont(
+                TTFont(font_name, str(font_path), shapable=True)
+            )
+
+        normal = ParagraphStyle(
+            "BengaliNormal",
+            fontName=font_name,
+            fontSize=9,
+            leading=13,
+            shaping=1,
+        )
+        heading = ParagraphStyle(
+            "BengaliHeading",
+            parent=normal,
+            fontSize=15,
+            leading=20,
+            alignment=1,
+            spaceAfter=8,
+        )
+        header = ParagraphStyle(
+            "BengaliHeader",
+            parent=normal,
+            textColor=colors.white,
+            alignment=1,
+        )
+
+        output = BytesIO()
+        document = SimpleDocTemplate(
+            output,
+            pagesize=A4,
+            rightMargin=14 * mm,
+            leftMargin=14 * mm,
+            topMargin=14 * mm,
+            bottomMargin=14 * mm,
+            title=title,
+        )
+        story = [
+            Paragraph(escape(title), heading),
+            Spacer(1, 3 * mm),
+        ]
+        table_data = [
+            [
+                Paragraph("তারিখ", header),
+                Paragraph("ক্যাটাগরি", header),
+                Paragraph("পরিমাণ", header),
+            ]
+        ]
+        for row in rows:
+            table_data.append(
+                [
+                    Paragraph(row["date"].strftime("%Y-%m-%d"), normal),
+                    Paragraph(escape(row["category"]), normal),
+                    Paragraph(f"৳{row['amount']:,.2f}".replace(".00", ""), normal),
+                ]
+            )
+        table_data.append(
+            [
+                "",
+                Paragraph("মোট", normal),
+                Paragraph(
+                    f"৳{sum(row['amount'] for row in rows):,.2f}".replace(
+                        ".00", ""
+                    ),
+                    normal,
+                ),
+            ]
+        )
+        table = LongTable(
+            table_data,
+            colWidths=[38 * mm, 92 * mm, 36 * mm],
+            repeatRows=1,
+        )
+        table.setStyle(
+            TableStyle(
+                [
+                    ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1F4E78")),
+                    ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#B7C9D6")),
+                    ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                    ("ALIGN", (0, 0), (0, -1), "CENTER"),
+                    ("ALIGN", (-1, 1), (-1, -1), "RIGHT"),
+                    ("BACKGROUND", (0, -1), (-1, -1), colors.HexColor("#EAF2F8")),
+                    ("TOPPADDING", (0, 0), (-1, -1), 6),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+                ]
+            )
+        )
+        story.append(table)
+        document.build(story)
+        return output.getvalue()
+
+    def export_period(
+        self, period: str, offset: int, file_format: str, title: str
+    ) -> bytes:
+        rows = self.get_period_rows(period, offset)
+        if file_format == "xlsx":
+            return self._build_xlsx(rows, title)
+        if file_format == "pdf":
+            return self._build_pdf(rows, title)
+        raise ValueError("Unsupported export format")

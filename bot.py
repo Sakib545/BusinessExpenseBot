@@ -1,4 +1,6 @@
 import asyncio
+from datetime import timedelta
+from io import BytesIO
 import logging
 
 from telegram import (
@@ -34,7 +36,7 @@ MENU = ReplyKeyboardMarkup(
     [
         ["📅 আজকের হিসাব", "🗓️ এই মাস"],
         ["📊 সারাংশ", "🗑️ Delete"],
-        ["ℹ️ Help"],
+        ["📤 Export PDF / Excel", "ℹ️ Help"],
     ],
     resize_keyboard=True,
     is_persistent=True,
@@ -69,7 +71,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/today — আজকের হিসাব\n"
         "/month — এই মাসের হিসাব\n"
         "/summary — সব ক্যাটাগরির মোট\n"
-        "/delete — সাম্প্রতিক খরচ Delete"
+        "/delete — সাম্প্রতিক খরচ Delete\n"
+        "/export — PDF অথবা Excel Export"
         ,
         reply_markup=MENU,
     )
@@ -272,6 +275,187 @@ async def delete_callback(
         )
 
 
+async def export_menu(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    if await reject_if_unauthorized(update):
+        return
+    keyboard = InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("📅 Weekly", callback_data="export_list:week"),
+                InlineKeyboardButton("🗓️ Monthly", callback_data="export_list:month"),
+            ],
+            [InlineKeyboardButton("📚 সব হিসাব", callback_data="export_format:all:0")],
+            [InlineKeyboardButton("❌ Cancel", callback_data="export_cancel")],
+        ]
+    )
+    await update.effective_message.reply_text(
+        "📤 কোন সময়ের হিসাব Export চান?",
+        reply_markup=keyboard,
+    )
+
+
+def month_label(offset: int) -> str:
+    month_names = (
+        "জানুয়ারি", "ফেব্রুয়ারি", "মার্চ", "এপ্রিল", "মে", "জুন",
+        "জুলাই", "আগস্ট", "সেপ্টেম্বর", "অক্টোবর", "নভেম্বর", "ডিসেম্বর",
+    )
+    now = store.now()
+    month_index = now.year * 12 + now.month - 1 - offset
+    year, zero_based_month = divmod(month_index, 12)
+    if offset == 0:
+        prefix = "চলতি মাস"
+    elif offset == 1:
+        prefix = "গত মাস"
+    else:
+        prefix = month_names[zero_based_month]
+    return f"{prefix} ({month_names[zero_based_month]} {year})"
+
+
+def week_label(offset: int) -> str:
+    today = store.now().date()
+    current_monday = today - timedelta(days=today.weekday())
+    start = current_monday - timedelta(weeks=offset)
+    end = start + timedelta(days=6)
+    if offset == 0:
+        prefix = "চলতি সপ্তাহ"
+    elif offset == 1:
+        prefix = "গত সপ্তাহ"
+    else:
+        prefix = f"{offset} সপ্তাহ আগে"
+    return f"{prefix} ({start:%d/%m}–{end:%d/%m})"
+
+
+async def export_callback(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    query = update.callback_query
+    if not query:
+        return
+    await query.answer()
+    if not is_authorized(update):
+        await query.edit_message_text("⛔ এই কাজের অনুমতি আপনার নেই।")
+        return
+
+    data = query.data or ""
+    if data == "export_cancel":
+        await query.edit_message_text("❌ Export বাতিল করা হয়েছে।")
+        return
+
+    if data.startswith("export_list:"):
+        period = data.split(":", 1)[1]
+        if period == "month":
+            count = 12
+            label_function = month_label
+        elif period == "week":
+            count = 8
+            label_function = week_label
+        else:
+            return
+        buttons = [
+            [
+                InlineKeyboardButton(
+                    label_function(offset),
+                    callback_data=f"export_format:{period}:{offset}",
+                )
+            ]
+            for offset in range(count)
+        ]
+        buttons.append(
+            [InlineKeyboardButton("⬅️ পেছনে", callback_data="export_home")]
+        )
+        await query.edit_message_text(
+            "যে সময়ের হিসাব চান সেটি নির্বাচন করুন:",
+            reply_markup=InlineKeyboardMarkup(buttons),
+        )
+        return
+
+    if data == "export_home":
+        keyboard = InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton("📅 Weekly", callback_data="export_list:week"),
+                    InlineKeyboardButton("🗓️ Monthly", callback_data="export_list:month"),
+                ],
+                [InlineKeyboardButton("📚 সব হিসাব", callback_data="export_format:all:0")],
+                [InlineKeyboardButton("❌ Cancel", callback_data="export_cancel")],
+            ]
+        )
+        await query.edit_message_text(
+            "📤 কোন সময়ের হিসাব Export চান?", reply_markup=keyboard
+        )
+        return
+
+    if data.startswith("export_format:"):
+        _, period, offset_text = data.split(":")
+        offset = int(offset_text)
+        period_title = (
+            month_label(offset)
+            if period == "month"
+            else week_label(offset)
+            if period == "week"
+            else "সব হিসাব"
+        )
+        keyboard = InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton(
+                        "📄 PDF", callback_data=f"export_run:{period}:{offset}:pdf"
+                    ),
+                    InlineKeyboardButton(
+                        "📊 Excel", callback_data=f"export_run:{period}:{offset}:xlsx"
+                    ),
+                ],
+                [InlineKeyboardButton("❌ Cancel", callback_data="export_cancel")],
+            ]
+        )
+        await query.edit_message_text(
+            f"📤 {period_title}\n\nকোন format চান?",
+            reply_markup=keyboard,
+        )
+        return
+
+    if not data.startswith("export_run:"):
+        return
+    _, period, offset_text, file_format = data.split(":")
+    offset = int(offset_text)
+    period_title = (
+        month_label(offset)
+        if period == "month"
+        else week_label(offset)
+        if period == "week"
+        else "সব হিসাব"
+    )
+    label = "PDF" if file_format == "pdf" else "Excel"
+    extension = "pdf" if file_format == "pdf" else "xlsx"
+    filename = f"business-expenses-{period}-{offset}.{extension}"
+    await query.edit_message_text(f"⏳ {period_title}—{label} তৈরি হচ্ছে...")
+    try:
+        file_bytes = await asyncio.to_thread(
+            store.export_period,
+            period,
+            offset,
+            file_format,
+            period_title,
+        )
+    except Exception:
+        logger.exception("Could not export spreadsheet")
+        await query.edit_message_text(
+            "⚠️ Export করা যায়নি। কিছুক্ষণ পর আবার চেষ্টা করুন।"
+        )
+        return
+
+    document = BytesIO(file_bytes)
+    document.name = filename
+    await query.message.reply_document(
+        document=document,
+        filename=filename,
+        caption=f"✅ {period_title}—{label} Export",
+    )
+    await query.edit_message_text(f"✅ {label} file তৈরি হয়েছে।")
+
+
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     logger.exception("Unhandled Telegram update error", exc_info=context.error)
 
@@ -284,6 +468,7 @@ async def post_init(application: Application) -> None:
             BotCommand("month", "এই মাসের হিসাব"),
             BotCommand("summary", "সব ক্যাটাগরির মোট"),
             BotCommand("delete", "সাম্প্রতিক খরচ Delete"),
+            BotCommand("export", "PDF অথবা Excel Export"),
             BotCommand("help", "সাহায্য ও Menu"),
         ]
     )
@@ -305,15 +490,22 @@ def main() -> None:
     app.add_handler(CommandHandler("month", month))
     app.add_handler(CommandHandler("summary", summary))
     app.add_handler(CommandHandler("delete", delete_menu))
+    app.add_handler(CommandHandler("export", export_menu))
     app.add_handler(
         MessageHandler(filters.Regex(r"^📅 আজকের হিসাব$"), today)
     )
     app.add_handler(MessageHandler(filters.Regex(r"^🗓️ এই মাস$"), month))
     app.add_handler(MessageHandler(filters.Regex(r"^📊 সারাংশ$"), summary))
     app.add_handler(MessageHandler(filters.Regex(r"^🗑️ Delete$"), delete_menu))
+    app.add_handler(
+        MessageHandler(filters.Regex(r"^📤 Export PDF / Excel$"), export_menu)
+    )
     app.add_handler(MessageHandler(filters.Regex(r"^ℹ️ Help$"), start))
     app.add_handler(
         CallbackQueryHandler(delete_callback, pattern=r"^delete_(pick:|ok:|cancel)")
+    )
+    app.add_handler(
+        CallbackQueryHandler(export_callback, pattern=r"^export_(list:|format:|run:|home|cancel)")
     )
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, save_expense))
     app.add_error_handler(error_handler)
