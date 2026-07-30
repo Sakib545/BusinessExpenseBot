@@ -1,0 +1,22 @@
+services:
+  - type: worker
+    name: business-expense-bot
+    runtime: python
+    plan: starter
+    buildCommand: pip install -r requirements.txt
+    startCommand: python bot.py
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.13.5
+      - key: TIMEZONE
+        value: Asia/Dhaka
+      - key: WORKSHEET_NAME
+        value: Expenses
+      - key: BOT_TOKEN
+        sync: false
+      - key: ALLOWED_USER_IDS
+        sync: false
+      - key: SPREADSHEET_ID
+        sync: false
+      - key: GOOGLE_CREDENTIALS_JSON
+        sync: false
