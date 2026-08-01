@@ -1,0 +1,47 @@
+{
+  "Hair Oil": {
+    "include": [
+      "hair oil",
+      "hair oil 100ml",
+      "hair oil 100 ml",
+      "চুলের তেল",
+      "হেয়ার অয়েল",
+      "হেয়ার অয়েল",
+      "hair oil 200ml",
+      "hair oil 200 ml",
+      "hair oil - পরিমান 100ml",
+      "hair oil - পরিমান 200ml"
+    ],
+    "exclude": [
+      "massage oil",
+      "ম্যাসাজ অয়েল",
+      "ম্যাসাজ অয়েল"
+    ]
+  },
+  "Pain Oil": {
+    "include": [
+      "বুরাক নাইজেলা ম্যাসাজ অয়েল",
+      "বুরাক নাইজেলা ম্যাসাজ অয়েল",
+      "buraq nigella massage oil",
+      "burak nigella massage oil",
+      "nigella massage oil",
+      "massage oil 200ml",
+      "massage oil 200 ml",
+      "pain oil",
+      "pain relief oil",
+      "ব্যথার তেল",
+      "পেইন অয়েল",
+      "পেইন অয়েল",
+      "ম্যাসাজ অয়েল",
+      "ম্যাসাজ অয়েল",
+      "আল বোরাক অয়েল",
+      "আল বোরাক অয়েল",
+      "al borak oil",
+      "al buraq oil",
+      "borak oil",
+      "buraq oil",
+      "burak oil"
+    ],
+    "exclude": []
+  }
+}

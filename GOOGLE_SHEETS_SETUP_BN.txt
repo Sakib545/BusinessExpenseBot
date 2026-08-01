@@ -1,0 +1,26 @@
+GOOGLE SHEETS FINAL SETUP
+=========================
+
+1) Google Sheet-এর নিচের tab-এর নাম ঠিক করুন: Orders
+
+2) Sheet Share করুন এই Service Account email-এ (Editor):
+   expense-bot@silicon-glyph-504006-c7.iam.gserviceaccount.com
+
+3) Railway Variables-এ railway_variables.txt অনুযায়ী values দিন।
+
+4) GOOGLE_CREDENTIALS_JSON-এ পুরো নতুন Service Account JSON paste করুন।
+   JSON GitHub-এ upload করবেন না।
+
+5) Railway Volume mount /data রাখুন।
+
+6) Deploy / Redeploy দিন।
+
+7) নতুন Consignment ID-সহ CSV upload করে test করুন।
+
+Google Sheet columns:
+Date | Time | Product | Qty | COD | Phone
+
+নোট:
+- Duplicate order Sheet-এ যাবে না।
+- SQLite /data/bot_data.db মূল database হিসেবে থাকবে।
+- Google Sheets ব্যর্থ হলেও bot-এর import/export বন্ধ হবে না।

@@ -1,0 +1,9 @@
+Smart Product Accounts Bot V5.1 Stable
+
+Changes:
+- "আল বোরাক অয়েল" and English spelling variants are detected as Pain Oil.
+- Hair Oil and Pain Oil rows with quantity 2 or more are NOT included in automatic product Excel files.
+- Mixed-product rows (description separated by ||) are NOT included in automatic Hair/Pain Excel files.
+- Those excluded rows are still inserted into the database and remain included in COD, dashboard, reports, import history and delete-by-import.
+- Duplicate rules remain Consignment ID or Merchant Order ID only.
+- Existing Unknown Product, duplicate history, import delete, dashboard, reports and Railway behavior are preserved.
