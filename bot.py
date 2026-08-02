@@ -1,8 +1,6 @@
 import asyncio
-from datetime import datetime, timedelta
+from datetime import timedelta
 from io import BytesIO
-from pathlib import Path
-import tempfile
 import logging
 
 from telegram import (
@@ -23,9 +21,8 @@ from telegram.ext import (
 
 from config import settings
 from expense_parser import parse_amount_only, parse_expense
+from central_sync import sync_expense_snapshot
 from sheets import GoogleSheetStore
-from central_export import build_expense_central_export
-from central_push import upload_central_export
 
 
 logging.basicConfig(
@@ -40,8 +37,7 @@ MENU = ReplyKeyboardMarkup(
     [
         ["📅 আজকের হিসাব", "🗓️ এই মাস"],
         ["📊 সারাংশ", "🗑️ Delete"],
-        ["📤 Export PDF / Excel", "📦 Central Export"],
-        ["ℹ️ Help"],
+        ["📤 Export PDF / Excel", "ℹ️ Help"],
     ],
     resize_keyboard=True,
     is_persistent=True,
@@ -70,10 +66,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "এভাবে খরচ লিখুন:\n"
         "10000 তেলের টাকা\n"
         "৫০০০ পলির টাকা\n"
-        "3,000 বেতন\n"
-        "5000 খরির টাকা\n"
-        "3000 গাড়ি ভাড়া\n\n"
-        "তালিকায় না থাকা নাম লিখলেও সেটি Custom Category হিসেবে সেভ হবে।\n\n"
+        "3,000 বেতন\n\n"
         f"ক্যাটাগরি:\n{categories}\n\n"
         "কমান্ড:\n"
         "/today — আজকের হিসাব\n"
@@ -125,8 +118,8 @@ async def save_expense(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             )
             return
         await update.effective_message.reply_text(
-            "❌ বুঝতে পারিনি। Amount-এর পরে খরচের নাম লিখুন।\n"
-            "উদাহরণ: 5000 খরির টাকা অথবা 3000 গাড়ি ভাড়া"
+            "❌ বুঝতে পারিনি। উদাহরণ: 10000 তেলের টাকা\n"
+            "সঠিক ক্যাটাগরির নাম ব্যবহার করুন।"
         )
         return
 
@@ -181,6 +174,10 @@ async def category_callback(
 
     try:
         date_text = await asyncio.to_thread(store.add_expense, category, amount)
+        try:
+            await asyncio.to_thread(sync_expense_snapshot, store)
+        except Exception:
+            logging.exception("Central expense auto-sync failed")
     except Exception:
         logger.exception("Could not save categorized expense")
         await query.edit_message_text(
@@ -207,20 +204,10 @@ def format_report(title: str, rows: list[dict]) -> str:
         totals[category] = totals.get(category, 0) + row["amount"]
 
     lines = [title, ""]
-
-    # Show configured categories first, then any user-created custom categories.
-    ordered_categories = [
-        category for category in settings.categories if totals.get(category)
-    ]
-    custom_categories = sorted(
-        category
-        for category in totals
-        if category not in settings.categories and totals.get(category)
-    )
-
-    for category in [*ordered_categories, *custom_categories]:
-        amount = totals[category]
-        lines.append(f"• {category}: ৳{amount:,.2f}".replace(".00", ""))
+    for category in settings.categories:
+        amount = totals.get(category)
+        if amount:
+            lines.append(f"• {category}: ৳{amount:,.2f}".replace(".00", ""))
     grand_total = sum(totals.values())
     lines.extend(["", f"মোট: ৳{grand_total:,.2f}".replace(".00", "")])
     return "\n".join(lines)
@@ -353,6 +340,11 @@ async def delete_callback(
         try:
             row_number = int(data.split(":", 1)[1])
             deleted = await asyncio.to_thread(store.delete_expense, row_number)
+            if deleted:
+                try:
+                    await asyncio.to_thread(sync_expense_snapshot, store)
+                except Exception:
+                    logging.exception("Central expense sync after delete failed")
         except (ValueError, TypeError):
             deleted = None
         except Exception:
@@ -553,43 +545,6 @@ async def export_callback(
     await query.edit_message_text(f"✅ {label} file তৈরি হয়েছে।")
 
 
-
-async def central_export(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if await reject_if_unauthorized(update):
-        return
-    now = datetime.now(store.settings.timezone)
-    month_key = now.strftime("%Y-%m")
-    output = Path(tempfile.gettempdir()) / f"BURAQ_BusinessExpense_Central_{month_key}.xlsx"
-    try:
-        await asyncio.to_thread(
-            build_expense_central_export, store, output, month_key,
-            str(update.effective_user.id if update.effective_user else "Admin")
-        )
-    except Exception:
-        logger.exception("Central export failed")
-        await update.effective_message.reply_text("⚠️ Central Export তৈরি হয়নি।")
-        return
-    sync_result = await asyncio.to_thread(
-        upload_central_export,
-        output,
-        kind="expense",
-        month=month_key,
-    )
-    if sync_result.get("ok"):
-        sync_text = "\n☁️ Central Dashboard sync: ✅"
-    elif not sync_result.get("configured"):
-        sync_text = "\n⚠️ Central sync Variables সেট করা নেই"
-    else:
-        sync_text = f"\n⚠️ Central sync হয়নি: {sync_result.get('message', 'Unknown error')}"
-
-    with output.open("rb") as f:
-        await update.effective_message.reply_document(
-            document=f,
-            filename=output.name,
-            caption=f"✅ {month_key} Business Expense Central Export{sync_text}",
-        )
-
-
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     logger.exception("Unhandled Telegram update error", exc_info=context.error)
 
@@ -603,7 +558,6 @@ async def post_init(application: Application) -> None:
             BotCommand("summary", "সব ক্যাটাগরির মোট"),
             BotCommand("delete", "সাম্প্রতিক খরচ Delete"),
             BotCommand("export", "PDF অথবা Excel Export"),
-            BotCommand("central_export", "Central Accounts Excel"),
             BotCommand("help", "সাহায্য ও Menu"),
         ]
     )
@@ -626,7 +580,6 @@ def main() -> None:
     app.add_handler(CommandHandler("summary", summary))
     app.add_handler(CommandHandler("delete", delete_menu))
     app.add_handler(CommandHandler("export", export_menu))
-    app.add_handler(CommandHandler("central_export", central_export))
     app.add_handler(
         MessageHandler(filters.Regex(r"^📅 আজকের হিসাব$"), today)
     )
@@ -636,7 +589,6 @@ def main() -> None:
     app.add_handler(
         MessageHandler(filters.Regex(r"^📤 Export PDF / Excel$"), export_menu)
     )
-    app.add_handler(MessageHandler(filters.Regex(r"^📦 Central Export$"), central_export))
     app.add_handler(MessageHandler(filters.Regex(r"^ℹ️ Help$"), start))
     app.add_handler(
         CallbackQueryHandler(delete_callback, pattern=r"^delete_(pick:|ok:|cancel)")
