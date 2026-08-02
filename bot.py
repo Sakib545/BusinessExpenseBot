@@ -545,11 +545,37 @@ async def export_callback(
     await query.edit_message_text(f"✅ {label} file তৈরি হয়েছে।")
 
 
+
+async def central_sync_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if await reject_if_unauthorized(update):
+        return
+    status = await update.effective_message.reply_text(
+        "🔄 পুরোনো ও নতুন সব Expense Central-এ পাঠানো হচ্ছে…"
+    )
+    try:
+        result = await asyncio.to_thread(sync_expense_snapshot, store)
+        await status.edit_text(
+            f"✅ Buraq Hishab Central Sync সম্পন্ন\nমোট Expense: {result.get('synced', 0)}"
+        )
+    except Exception as exc:
+        logger.exception("Central expense sync failed")
+        await status.edit_text(
+            f"❌ Central Sync failed: {type(exc).__name__}: {exc}"
+        )
+
+
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     logger.exception("Unhandled Telegram update error", exc_info=context.error)
 
 
 async def post_init(application: Application) -> None:
+    # First startup also sends every old expense to the Central Sheet.
+    try:
+        result = await asyncio.to_thread(sync_expense_snapshot, store)
+        logger.info("Central historical expense backfill complete: %s", result)
+    except Exception:
+        logger.exception("Central historical expense backfill failed")
+
     await application.bot.set_my_commands(
         [
             BotCommand("start", "Bot চালু ও Menu দেখুন"),
@@ -580,6 +606,7 @@ def main() -> None:
     app.add_handler(CommandHandler("summary", summary))
     app.add_handler(CommandHandler("delete", delete_menu))
     app.add_handler(CommandHandler("export", export_menu))
+    app.add_handler(CommandHandler("central_sync", central_sync_command))
     app.add_handler(
         MessageHandler(filters.Regex(r"^📅 আজকের হিসাব$"), today)
     )
