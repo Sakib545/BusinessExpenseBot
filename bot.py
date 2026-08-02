@@ -25,6 +25,7 @@ from config import settings
 from expense_parser import parse_amount_only, parse_expense
 from sheets import GoogleSheetStore
 from central_export import build_expense_central_export
+from central_push import upload_central_export
 
 
 logging.basicConfig(
@@ -568,10 +569,24 @@ async def central_export(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         logger.exception("Central export failed")
         await update.effective_message.reply_text("⚠️ Central Export তৈরি হয়নি।")
         return
+    sync_result = await asyncio.to_thread(
+        upload_central_export,
+        output,
+        kind="expense",
+        month=month_key,
+    )
+    if sync_result.get("ok"):
+        sync_text = "\n☁️ Central Dashboard sync: ✅"
+    elif not sync_result.get("configured"):
+        sync_text = "\n⚠️ Central sync Variables সেট করা নেই"
+    else:
+        sync_text = f"\n⚠️ Central sync হয়নি: {sync_result.get('message', 'Unknown error')}"
+
     with output.open("rb") as f:
         await update.effective_message.reply_document(
-            document=f, filename=output.name,
-            caption=f"✅ {month_key} Business Expense Central Export",
+            document=f,
+            filename=output.name,
+            caption=f"✅ {month_key} Business Expense Central Export{sync_text}",
         )
 
 

@@ -1,30 +1,4 @@
-GOOGLE SHEETS READY SETUP
-
-Sheet ID:
-1e8Ev_j2DPNI8rUAVVtZYCl_WPe9P_WrAejfxZjA-d7Y
-
-Worksheet/tab name:
-Orders
-
-Service account email to share the Google Sheet with as Editor:
-expense-bot@silicon-glyph-504006-c7.iam.gserviceaccount.com
-
-IMPORTANT SECURITY:
-The uploaded JSON private key was exposed in chat. Delete/revoke that key from Google Cloud and create a NEW JSON key before deployment.
-Never commit the JSON file to GitHub.
-
-STEPS:
-1. In Google Sheet, rename the bottom tab exactly to: Orders
-2. Share the Sheet with the service-account email above, role: Editor.
-3. Replace/upload bot.py, google_sheets.py, and requirements.txt in GitHub.
-4. In Railway Variables add:
-   GOOGLE_SHEET_ID=1e8Ev_j2DPNI8rUAVVtZYCl_WPe9P_WrAejfxZjA-d7Y
-   GOOGLE_WORKSHEET=Orders
-   GOOGLE_CREDENTIALS_JSON=<paste the full NEW JSON as one value>
-5. Redeploy Railway.
-6. Upload a CSV containing a NEW Consignment/Merchant Order ID. Existing duplicates are not synced again.
-
-Sheet columns are created automatically:
-Date | Time | Product | Qty | COD | Phone
-
-The same service account may be used for another bot and another spreadsheet, but every spreadsheet must be separately shared with the service-account email.
+bot.py, central_export.py ও central_push.py replace/add করুন।
+Railway Variables:
+CENTRAL_API_URL=https://YOUR-CENTRAL-SERVICE-DOMAIN/api/upload
+CENTRAL_API_SECRET=SAME_LONG_SECRET
