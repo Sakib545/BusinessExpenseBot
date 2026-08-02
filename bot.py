@@ -1,6 +1,8 @@
 import asyncio
-from datetime import timedelta
+from datetime import datetime, timedelta
 from io import BytesIO
+from pathlib import Path
+import tempfile
 import logging
 
 from telegram import (
@@ -22,6 +24,7 @@ from telegram.ext import (
 from config import settings
 from expense_parser import parse_amount_only, parse_expense
 from sheets import GoogleSheetStore
+from central_export import build_expense_central_export
 
 
 logging.basicConfig(
@@ -36,7 +39,8 @@ MENU = ReplyKeyboardMarkup(
     [
         ["📅 আজকের হিসাব", "🗓️ এই মাস"],
         ["📊 সারাংশ", "🗑️ Delete"],
-        ["📤 Export PDF / Excel", "ℹ️ Help"],
+        ["📤 Export PDF / Excel", "📦 Central Export"],
+        ["ℹ️ Help"],
     ],
     resize_keyboard=True,
     is_persistent=True,
@@ -548,6 +552,29 @@ async def export_callback(
     await query.edit_message_text(f"✅ {label} file তৈরি হয়েছে।")
 
 
+
+async def central_export(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if await reject_if_unauthorized(update):
+        return
+    now = datetime.now(store.settings.timezone)
+    month_key = now.strftime("%Y-%m")
+    output = Path(tempfile.gettempdir()) / f"BURAQ_BusinessExpense_Central_{month_key}.xlsx"
+    try:
+        await asyncio.to_thread(
+            build_expense_central_export, store, output, month_key,
+            str(update.effective_user.id if update.effective_user else "Admin")
+        )
+    except Exception:
+        logger.exception("Central export failed")
+        await update.effective_message.reply_text("⚠️ Central Export তৈরি হয়নি।")
+        return
+    with output.open("rb") as f:
+        await update.effective_message.reply_document(
+            document=f, filename=output.name,
+            caption=f"✅ {month_key} Business Expense Central Export",
+        )
+
+
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     logger.exception("Unhandled Telegram update error", exc_info=context.error)
 
@@ -561,6 +588,7 @@ async def post_init(application: Application) -> None:
             BotCommand("summary", "সব ক্যাটাগরির মোট"),
             BotCommand("delete", "সাম্প্রতিক খরচ Delete"),
             BotCommand("export", "PDF অথবা Excel Export"),
+            BotCommand("central_export", "Central Accounts Excel"),
             BotCommand("help", "সাহায্য ও Menu"),
         ]
     )
@@ -583,6 +611,7 @@ def main() -> None:
     app.add_handler(CommandHandler("summary", summary))
     app.add_handler(CommandHandler("delete", delete_menu))
     app.add_handler(CommandHandler("export", export_menu))
+    app.add_handler(CommandHandler("central_export", central_export))
     app.add_handler(
         MessageHandler(filters.Regex(r"^📅 আজকের হিসাব$"), today)
     )
@@ -592,6 +621,7 @@ def main() -> None:
     app.add_handler(
         MessageHandler(filters.Regex(r"^📤 Export PDF / Excel$"), export_menu)
     )
+    app.add_handler(MessageHandler(filters.Regex(r"^📦 Central Export$"), central_export))
     app.add_handler(MessageHandler(filters.Regex(r"^ℹ️ Help$"), start))
     app.add_handler(
         CallbackQueryHandler(delete_callback, pattern=r"^delete_(pick:|ok:|cancel)")
