@@ -21,7 +21,7 @@ from telegram.ext import (
 
 from config import settings
 from expense_parser import parse_amount_only, parse_expense
-from central_sync import sync_expense_snapshot
+from central_sync import sync_expense_snapshot, flush_pending_central
 from sheets import GoogleSheetStore
 
 
@@ -555,7 +555,9 @@ async def central_sync_command(update: Update, context: ContextTypes.DEFAULT_TYP
     try:
         result = await asyncio.to_thread(sync_expense_snapshot, store)
         await status.edit_text(
-            f"✅ Buraq Hishab Central Sync সম্পন্ন\nমোট Expense: {result.get('synced', 0)}"
+            "✅ Buraq Hishab Central Sync সম্পন্ন\n"
+            f"মোট Entry: {result.get('synced', 0)}\n"
+            f"মোট Expense: {result.get('source_total', 0):,.2f} টাকা"
         )
     except Exception as exc:
         logger.exception("Central expense sync failed")
@@ -568,7 +570,16 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
     logger.exception("Unhandled Telegram update error", exc_info=context.error)
 
 
+async def central_retry_loop():
+    while True:
+        await asyncio.sleep(300)
+        try:
+            await asyncio.to_thread(flush_pending_central)
+        except Exception:
+            logger.exception("Central pending retry failed")
+
 async def post_init(application: Application) -> None:
+    asyncio.create_task(central_retry_loop())
     # First startup also sends every old expense to the Central Sheet.
     try:
         result = await asyncio.to_thread(sync_expense_snapshot, store)

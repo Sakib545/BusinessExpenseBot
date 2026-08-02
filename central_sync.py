@@ -4,6 +4,7 @@ from datetime import datetime
 from typing import Any
 import gspread
 from google.oauth2.service_account import Credentials
+from central_offline import flush_snapshot, sync_snapshot
 
 SCOPES=["https://www.googleapis.com/auth/spreadsheets"]
 
@@ -37,7 +38,7 @@ def _ws(title:str, headers:list[str]):
     except Exception: pass
     return ws
 
-def replace_tab(title:str, headers:list[str], rows:list[list[Any]]) -> int:
+def _replace_tab_online(title:str, headers:list[str], rows:list[list[Any]]) -> int:
     if not enabled(): return 0
     ws=_ws(title,headers)
     ws.clear(); ws.update(range_name=f"A1:{chr(64+len(headers))}1", values=[headers])
@@ -56,6 +57,10 @@ def _touch(source:str,count:int):
     if found: ws.update(range_name=f"A{found}:C{found}", values=[[source,now,count]])
     else: ws.append_row([source,now,count], value_input_option="USER_ENTERED")
 
+
+def flush_pending_central() -> dict[str, Any]:
+    return flush_snapshot("Business_Expenses", _replace_tab_online)
+
 def read_tab(title:str) -> list[dict[str,Any]]:
     if not enabled(): return []
     try: return _book().worksheet(title).get_all_records()
@@ -63,7 +68,30 @@ def read_tab(title:str) -> list[dict[str,Any]]:
 
 HEADERS=["Source ID","Date","Category","Amount","Updated At"]
 def sync_expense_snapshot(store) -> dict[str,Any]:
+    source_rows = store.get_all()
     rows=[]
-    for r in store.get_all():
-        rows.append([f"EXP-{r['row_number']}",r['date'].isoformat(),r['category'],float(r['amount'] or 0),datetime.now().isoformat(timespec='seconds')])
-    return {"synced":replace_tab("Business_Expenses",HEADERS,rows)}
+    total = 0.0
+    for r in source_rows:
+        amount = float(r['amount'] or 0)
+        total += amount
+        rows.append([
+            f"EXP-{r['row_number']}",
+            r['date'].isoformat(),
+            r['category'],
+            amount,
+            datetime.now().isoformat(timespec='seconds')
+        ])
+    result = sync_snapshot(
+        "Business_Expenses", "Business_Expenses", HEADERS, rows, _replace_tab_online
+    )
+    return {
+        "synced": int(result.get("synced") or 0),
+        "queued": bool(result.get("queued")),
+        "pending": int(result.get("pending") or 0),
+        "sync_error": result.get("error") or "",
+        "source_count": len(source_rows),
+        "source_total": total,
+        "source_sheet": getattr(
+            getattr(store, "_spreadsheet", None), "title", "All Expenses"
+        ),
+    }
