@@ -25,8 +25,19 @@ class ExpenseParserTests(unittest.TestCase):
         result = parse_expense("3000 বেতন", CATEGORIES)
         self.assertEqual(result.category, "বেতন")
 
-    def test_unknown_category(self):
-        self.assertIsNone(parse_expense("500 খাবার", CATEGORIES))
+    def test_custom_bengali_category(self):
+        result = parse_expense("5000 খরির টাকা", CATEGORIES)
+        self.assertEqual(result.amount, 5000)
+        self.assertEqual(result.category, "খরির টাকা")
+
+    def test_custom_transport_category(self):
+        result = parse_expense("3000 গাড়ি ভাড়া", CATEGORIES)
+        self.assertEqual(result.amount, 3000)
+        self.assertEqual(result.category, "গাড়ি ভাড়া")
+
+    def test_custom_category_whitespace_is_normalized(self):
+        result = parse_expense("1000   দোকানের   নাস্তা", CATEGORIES)
+        self.assertEqual(result.category, "দোকানের নাস্তা")
 
     def test_zero_is_rejected(self):
         self.assertIsNone(parse_expense("0 বেতন", CATEGORIES))

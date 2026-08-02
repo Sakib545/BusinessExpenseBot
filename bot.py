@@ -65,7 +65,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "এভাবে খরচ লিখুন:\n"
         "10000 তেলের টাকা\n"
         "৫০০০ পলির টাকা\n"
-        "3,000 বেতন\n\n"
+        "3,000 বেতন\n"
+        "5000 খরির টাকা\n"
+        "3000 গাড়ি ভাড়া\n\n"
+        "তালিকায় না থাকা নাম লিখলেও সেটি Custom Category হিসেবে সেভ হবে।\n\n"
         f"ক্যাটাগরি:\n{categories}\n\n"
         "কমান্ড:\n"
         "/today — আজকের হিসাব\n"
@@ -117,8 +120,8 @@ async def save_expense(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             )
             return
         await update.effective_message.reply_text(
-            "❌ বুঝতে পারিনি। উদাহরণ: 10000 তেলের টাকা\n"
-            "সঠিক ক্যাটাগরির নাম ব্যবহার করুন।"
+            "❌ বুঝতে পারিনি। Amount-এর পরে খরচের নাম লিখুন।\n"
+            "উদাহরণ: 5000 খরির টাকা অথবা 3000 গাড়ি ভাড়া"
         )
         return
 
@@ -199,10 +202,20 @@ def format_report(title: str, rows: list[dict]) -> str:
         totals[category] = totals.get(category, 0) + row["amount"]
 
     lines = [title, ""]
-    for category in settings.categories:
-        amount = totals.get(category)
-        if amount:
-            lines.append(f"• {category}: ৳{amount:,.2f}".replace(".00", ""))
+
+    # Show configured categories first, then any user-created custom categories.
+    ordered_categories = [
+        category for category in settings.categories if totals.get(category)
+    ]
+    custom_categories = sorted(
+        category
+        for category in totals
+        if category not in settings.categories and totals.get(category)
+    )
+
+    for category in [*ordered_categories, *custom_categories]:
+        amount = totals[category]
+        lines.append(f"• {category}: ৳{amount:,.2f}".replace(".00", ""))
     grand_total = sum(totals.values())
     lines.extend(["", f"মোট: ৳{grand_total:,.2f}".replace(".00", "")])
     return "\n".join(lines)

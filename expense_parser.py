@@ -28,11 +28,23 @@ def parse_expense(text: str, categories: tuple[str, ...]) -> ParsedExpense | Non
     if amount <= 0:
         return None
 
-    supplied_category = match.group(2).strip()
-    category_lookup = {normalize(category).casefold(): category for category in categories}
-    category = category_lookup.get(supplied_category.casefold())
-    if not category:
+    supplied_category = normalize(match.group(2))
+    if not supplied_category or len(supplied_category) > 100:
         return None
+
+    # Prevent spreadsheet formula injection while still allowing normal custom
+    # Bengali/English descriptions such as "খরির টাকা" or "গাড়ি ভাড়া".
+    if supplied_category[0] in "=+@":
+        return None
+
+    # Known categories keep their configured/canonical spelling. Anything else
+    # is saved exactly as the user wrote it (after whitespace normalization).
+    category_lookup = {
+        normalize(category).casefold(): category for category in categories
+    }
+    category = category_lookup.get(
+        supplied_category.casefold(), supplied_category
+    )
 
     return ParsedExpense(amount=amount, category=category)
 
