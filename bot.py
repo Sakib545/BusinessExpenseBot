@@ -20,7 +20,7 @@ from telegram.ext import (
 )
 
 from config import settings
-from expense_parser import parse_amount_only, parse_expense
+from expense_parser import parse_amount_only, parse_expenses
 from central_sync import sync_expense_snapshot, flush_pending_central
 from sheets import GoogleSheetStore
 
@@ -84,8 +84,8 @@ async def save_expense(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return
 
     text = update.effective_message.text or ""
-    parsed = parse_expense(text, settings.categories)
-    if not parsed:
+    parsed_entries = parse_expenses(text, settings.categories)
+    if not parsed_entries:
         amount = parse_amount_only(text)
         if amount is not None:
             context.user_data["pending_amount"] = amount
@@ -106,11 +106,7 @@ async def save_expense(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                     )
                 category_buttons.append(row)
             category_buttons.append(
-                [
-                    InlineKeyboardButton(
-                        "❌ Cancel", callback_data="category_cancel"
-                    )
-                ]
+                [InlineKeyboardButton("❌ Cancel", callback_data="category_cancel")]
             )
             await update.effective_message.reply_text(
                 f"💰 পরিমাণ: {amount_text(amount)}\n\nএটা কিসের টাকা?",
@@ -118,28 +114,48 @@ async def save_expense(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             )
             return
         await update.effective_message.reply_text(
-            "❌ বুঝতে পারিনি। উদাহরণ: 10000 তেলের টাকা\n"
-            "সঠিক ক্যাটাগরির নাম ব্যবহার করুন।"
+            "❌ বুঝতে পারিনি। উদাহরণ:\n"
+            "500 খরচ\n"
+            "300 খাবার\n"
+            "অথবা একসাথে: 500 খরচ 300 খাবার"
         )
         return
 
+    saved: list[tuple[str, float, str]] = []
     try:
-        date_text = await asyncio.to_thread(
-            store.add_expense, parsed.category, parsed.amount
-        )
+        for parsed in parsed_entries:
+            date_text = await asyncio.to_thread(
+                store.add_expense, parsed.category, parsed.amount
+            )
+            saved.append((parsed.category, parsed.amount, date_text))
+        try:
+            await asyncio.to_thread(sync_expense_snapshot, store)
+        except Exception:
+            logging.exception("Central expense auto-sync failed")
     except Exception:
-        logger.exception("Could not save expense")
+        logger.exception("Could not save custom expense")
         await update.effective_message.reply_text(
             "⚠️ Google Sheet-এ সেভ করা যায়নি। কিছুক্ষণ পর আবার চেষ্টা করুন।"
         )
         return
 
-    await update.effective_message.reply_text(
-        "✅ খরচ সেভ হয়েছে\n"
-        f"📅 তারিখ: {date_text}\n"
-        f"📂 ক্যাটাগরি: {parsed.category}\n"
-        f"💰 পরিমাণ: ৳{parsed.amount:,.2f}".replace(".00", "")
-    )
+    if len(saved) == 1:
+        category, amount, date_text = saved[0]
+        await update.effective_message.reply_text(
+            "✅ খরচ সেভ হয়েছে\n"
+            f"📅 তারিখ: {date_text}\n"
+            f"📂 ক্যাটাগরি: {category}\n"
+            f"💰 পরিমাণ: {amount_text(amount)}"
+        )
+        return
+
+    lines = [f"✅ {len(saved)}টি খরচ সেভ হয়েছে", ""]
+    total = 0.0
+    for category, amount, _ in saved:
+        total += amount
+        lines.append(f"• {category}: {amount_text(amount)}")
+    lines.extend(["", f"মোট: {amount_text(total)}"])
+    await update.effective_message.reply_text("\n".join(lines))
 
 
 async def category_callback(
@@ -204,10 +220,18 @@ def format_report(title: str, rows: list[dict]) -> str:
         totals[category] = totals.get(category, 0) + row["amount"]
 
     lines = [title, ""]
+    shown: set[str] = set()
     for category in settings.categories:
         amount = totals.get(category)
         if amount:
             lines.append(f"• {category}: ৳{amount:,.2f}".replace(".00", ""))
+            shown.add(category)
+
+    # Custom categories are shown after the predefined categories.
+    for category in sorted((name for name in totals if name not in shown), key=str.casefold):
+        amount = totals[category]
+        lines.append(f"• {category}: ৳{amount:,.2f}".replace(".00", ""))
+
     grand_total = sum(totals.values())
     lines.extend(["", f"মোট: ৳{grand_total:,.2f}".replace(".00", "")])
     return "\n".join(lines)
